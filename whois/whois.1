@@ -272,6 +272,27 @@ to return a brief description of its
 object type:
 .Pp
 .Dl Ic whois -r -- '-t domain'
+.Sh RDAP SUPPORT
+.Pp
+If compiled with RDAP support, the
+.Nm
+utility can query Registration Data Access Protocol (RDAP) servers in addition
+to traditional WHOIS servers.
+.Pp
+By default, RDAP lookups are attempted first and will automatically fall back
+to the WHOIS protocol if the RDAP query fails.
+.Bl -tag -width "--legacy"
+.It Fl -rdap
+Force RDAP lookup mode explicitly.  This is the default if the program was
+compiled with RDAP support.
+.It Fl -legacy
+.It Fl -no-rdap
+Force the use of the classic WHOIS protocol over TCP port 43.
+This option disables RDAP for the current invocation.
+.El
+.Pp
+RDAP responses are formatted to resemble the traditional WHOIS output style
+for consistency with existing tools and scripts.
 .Sh STANDARDS
 .Rs
 .%A K. Harrenstien

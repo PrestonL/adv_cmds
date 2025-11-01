@@ -61,7 +61,12 @@ __FBSDID("$FreeBSD$");
 #include <fcntl.h>
 #include <errno.h>
 
+
 #ifdef __APPLE__
+#ifdef WITH_RDAP
+#include <CoreFoundation/CoreFoundation.h>
+#include <CFNetwork/CFNetwork.h>
+#endif
 #ifndef SOCK_NONBLOCK
 #define SOCK_NONBLOCK 0
 #endif
@@ -87,6 +92,13 @@ __FBSDID("$FreeBSD$");
 #define	RNICHOST	"whois.ripe.net"
 #define	VNICHOST	"whois.verisign-grs.com"
 
+/* New RDAP base URLs for each Regional Internet Registry */
+#define    ANIC_RDAP    "https://rdap.arin.net/registry"
+#define    RNIC_RDAP    "https://rdap.db.ripe.net"
+#define    PNIC_RDAP    "https://rdap.apnic.net"
+#define    LNIC_RDAP    "https://rdap.lacnic.net/rdap"
+#define    FNIC_RDAP    "https://rdap.afrinic.net/rdap"
+
 #ifdef __APPLE__
 #define	DEFAULT_PORT	"nicname"
 #else
@@ -96,6 +108,7 @@ __FBSDID("$FreeBSD$");
 #define WHOIS_RECURSE	0x01
 #define WHOIS_QUICK	0x02
 #define WHOIS_SPAM_ME	0x04
+#define WHOIS_RDAP 0x08
 
 #define CHOPSPAM	">>> Last update of WHOIS database:"
 
@@ -182,106 +195,124 @@ static void whois(const char *, const char *, const char *, int);
 int
 main(int argc, char *argv[])
 {
-	const char *country, *host;
-	int ch, flags;
+    const char *country, *host;
+    int ch, flags;
+    int use_rdap = 1;  /* RDAP default ON if compiled with it */
+    #ifndef WITH_RDAP
+        use_rdap = 0;  /* disable if not built with RDAP */
+    #endif
 
-#ifdef	SOCKS
-	SOCKSinit(argv[0]);
-#endif
+    /* Handle explicit --rdap, --legacy, --no-rdap */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--rdap") == 0) {
+    #ifdef WITH_RDAP
+            use_rdap = 1;
+    #else
+            fprintf(stderr, "whois: compiled without RDAP support\n");
+    #endif
+            memmove(&argv[i], &argv[i + 1], (argc - i - 1) * sizeof(char *));
+            argc--;
+            break;
+        } else if (strcmp(argv[i], "--legacy") == 0 || strcmp(argv[i], "--no-rdap") == 0) {
+            use_rdap = 0;
+            memmove(&argv[i], &argv[i + 1], (argc - i - 1) * sizeof(char *));
+            argc--;
+            break;
+        }
+    }
 
-	country = host = NULL;
-	flags = 0;
-	while ((ch = getopt(argc, argv, "aAbc:fgh:iIklmp:PQrRS")) != -1) {
-		switch (ch) {
-		case 'a':
-			host = ANICHOST;
-			break;
-		case 'A':
-			host = PNICHOST;
-			break;
-		case 'b':
-			host = ABUSEHOST;
-			break;
-		case 'c':
-			country = optarg;
-			break;
-		case 'f':
-			host = FNICHOST;
-			break;
-		case 'g':
-			host = GNICHOST;
-			break;
-		case 'h':
-			host = optarg;
-			break;
-		case 'i':
-			host = INICHOST;
-			break;
-		case 'I':
-			host = IANAHOST;
-			break;
-		case 'k':
-			host = KNICHOST;
-			break;
-		case 'l':
-			host = LNICHOST;
-			break;
-		case 'm':
-			host = MNICHOST;
-			break;
-		case 'p':
-			port = optarg;
-			break;
-		case 'P':
-			host = PDBHOST;
-			break;
-		case 'Q':
-			flags |= WHOIS_QUICK;
-			break;
-		case 'r':
-			host = RNICHOST;
-			break;
-		case 'R':
-			flags |= WHOIS_RECURSE;
-			break;
-		case 'S':
-			flags |= WHOIS_SPAM_ME;
-			break;
-		case '?':
-		default:
-			usage();
-			/* NOTREACHED */
-		}
-	}
-	argc -= optind;
-	argv += optind;
+    country = host = NULL;
+    flags = 0;
 
-	if (!argc || (country != NULL && host != NULL))
-		usage();
+    while ((ch = getopt(argc, argv, "aAbc:fgh:iIklmp:PQrRS")) != -1) {
+        switch (ch) {
+        case 'a':
+            host = ANICHOST;
+            break;
+        case 'A':
+            host = PNICHOST;
+            break;
+        case 'b':
+            host = ABUSEHOST;
+            break;
+        case 'c':
+            country = optarg;
+            break;
+        case 'f':
+            host = FNICHOST;
+            break;
+        case 'g':
+            host = GNICHOST;
+            break;
+        case 'h':
+            host = optarg;
+            break;
+        case 'i':
+            host = INICHOST;
+            break;
+        case 'I':
+            host = IANAHOST;
+            break;
+        case 'k':
+            host = KNICHOST;
+            break;
+        case 'l':
+            host = LNICHOST;
+            break;
+        case 'm':
+            host = MNICHOST;
+            break;
+        case 'p':
+            port = optarg;
+            break;
+        case 'P':
+            host = PDBHOST;
+            break;
+        case 'Q':
+            flags |= WHOIS_QUICK;
+            break;
+        case 'r':
+            host = RNICHOST;
+            break;
+        case 'R':
+            flags |= WHOIS_RECURSE;
+            break;
+        case 'S':
+            flags |= WHOIS_SPAM_ME;
+            break;
+        case '?':
+        default:
+            usage();
+        }
+    }
+    argc -= optind;
+    argv += optind;
 
-	/*
-	 * If no host or country is specified, rely on referrals from IANA.
-	 */
-	if (host == NULL && country == NULL) {
-		if ((host = getenv("WHOIS_SERVER")) == NULL &&
-		    (host = getenv("RA_SERVER")) == NULL) {
-			if (!(flags & WHOIS_QUICK))
-				flags |= WHOIS_RECURSE;
-		}
-	}
-	while (argc-- > 0) {
-		if (country != NULL) {
-			char *qnichost;
-			s_asprintf(&qnichost, "%s%s", country, QNICHOST_TAIL);
-			whois(*argv, qnichost, port, flags);
-			free(qnichost);
-		} else
-			whois(*argv, host != NULL ? host :
-			      choose_server(*argv), port, flags);
-		reset_rir();
-		argv++;
-	}
-	exit(0);
+    if (!argc || (country != NULL && host != NULL))
+        usage();
+
+    if (host == NULL && country == NULL) {
+        if ((host = getenv("WHOIS_SERVER")) == NULL &&
+            (host = getenv("RA_SERVER")) == NULL) {
+            if (!(flags & WHOIS_QUICK))
+                flags |= WHOIS_RECURSE;
+        }
+    }
+
+    while (argc-- > 0) {
+        if (country != NULL) {
+            char *qnichost;
+            s_asprintf(&qnichost, "%s%s", country, QNICHOST_TAIL);
+            whois(*argv, qnichost, port, flags | (use_rdap ? WHOIS_RDAP : 0));
+            free(qnichost);
+        } else {
+            whois(*argv, host != NULL ? host :
+                  choose_server(*argv), port, flags | (use_rdap ? WHOIS_RDAP : 0));
+        }
+        reset_rir();
+        argv++;
+    }
+    exit(0);
 }
 
 static const char *
@@ -473,6 +504,155 @@ done:
 	return (s);
 }
 
+#ifdef WITH_RDAP
+/* Helper: recursively print JSON objects in WHOIS-style layout */
+static void
+print_json_as_whois(CFTypeRef obj, int indent)
+{
+    if (CFGetTypeID(obj) == CFDictionaryGetTypeID()) {
+        CFDictionaryRef dict = (CFDictionaryRef)obj;
+        CFIndex count = CFDictionaryGetCount(dict);
+        const void **keys = malloc(sizeof(void *) * count);
+        const void **vals = malloc(sizeof(void *) * count);
+        CFDictionaryGetKeysAndValues(dict, keys, vals);
+        for (CFIndex i = 0; i < count; i++) {
+            CFStringRef key = (CFStringRef)keys[i];
+            CFTypeRef val = vals[i];
+            char kbuf[128];
+            CFStringGetCString(key, kbuf, sizeof(kbuf), kCFStringEncodingUTF8);
+
+            /* Flatten well-known RDAP fields into WHOIS-like labels */
+            if (!strcmp(kbuf, "startAddress") || !strcmp(kbuf, "endAddress")) {
+                char vbuf[256] = {0};
+                CFStringRef vstr = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"), val);
+                CFStringGetCString(vstr, vbuf, sizeof(vbuf), kCFStringEncodingUTF8);
+                printf("%s:        %s\n", strcmp(kbuf, "startAddress")==0 ? "inetnum" : "to", vbuf);
+                CFRelease(vstr);
+            } else if (!strcmp(kbuf, "name")) {
+                char vbuf[256] = {0};
+                CFStringRef vstr = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"), val);
+                CFStringGetCString(vstr, vbuf, sizeof(vbuf), kCFStringEncodingUTF8);
+                printf("netname:        %s\n", vbuf);
+                CFRelease(vstr);
+            } else if (!strcmp(kbuf, "country")) {
+                char vbuf[64] = {0};
+                CFStringRef vstr = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"), val);
+                CFStringGetCString(vstr, vbuf, sizeof(vbuf), kCFStringEncodingUTF8);
+                printf("country:        %s\n", vbuf);
+                CFRelease(vstr);
+            } else if (!strcmp(kbuf, "remarks")) {
+                CFTypeID t = CFGetTypeID(val);
+                if (t == CFArrayGetTypeID()) {
+                    CFArrayRef arr = (CFArrayRef)val;
+                    for (CFIndex j=0;j<CFArrayGetCount(arr);j++) {
+                        CFTypeRef item = CFArrayGetValueAtIndex(arr,j);
+                        CFStringRef v = CFStringCreateWithFormat(NULL,NULL,CFSTR("%@"),item);
+                        char vbuf[512];
+                        CFStringGetCString(v, vbuf, sizeof(vbuf), kCFStringEncodingUTF8);
+                        printf("remarks:        %s\n", vbuf);
+                        CFRelease(v);
+                    }
+                }
+            } else if (!strcmp(kbuf, "entities")) {
+                /* Dive into nested entities recursively */
+                print_json_as_whois(val, indent + 2);
+            } else {
+                /* Recurse or print scalar values */
+                CFTypeID t = CFGetTypeID(val);
+                if (t == CFStringGetTypeID() || t == CFNumberGetTypeID()) {
+                    CFStringRef v = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@"), val);
+                    char vbuf[512];
+                    CFStringGetCString(v, vbuf, sizeof(vbuf), kCFStringEncodingUTF8);
+                    printf("%s:        %s\n", kbuf, vbuf);
+                    CFRelease(v);
+                } else {
+                    print_json_as_whois(val, indent + 2);
+                }
+            }
+        }
+        free(keys); free(vals);
+    } else if (CFGetTypeID(obj) == CFArrayGetTypeID()) {
+        CFArrayRef arr = (CFArrayRef)obj;
+        for (CFIndex i=0;i<CFArrayGetCount(arr);i++) {
+            print_json_as_whois(CFArrayGetValueAtIndex(arr,i), indent);
+        }
+    }
+}
+
+static int
+rdap_query(const char *hostname, const char *query, int flags)
+{
+    const char *base = NULL;
+    char url[512];
+    CFStringRef urlString;
+    CFURLRef urlRef;
+    CFReadStreamRef stream;
+    UInt8 buf[4096];
+    CFIndex n;
+
+    if      (!strcasecmp(hostname, ANICHOST)) base = ANIC_RDAP;
+    else if (!strcasecmp(hostname, RNICHOST)) base = RNIC_RDAP;
+    else if (!strcasecmp(hostname, PNICHOST)) base = PNIC_RDAP;
+    else if (!strcasecmp(hostname, LNICHOST)) base = LNIC_RDAP;
+    else if (!strcasecmp(hostname, FNICHOST)) base = FNIC_RDAP;
+    else
+        return -1;
+
+    if (isdigit((unsigned char)query[0]))
+        snprintf(url, sizeof(url), "%s/ip/%s", base, query);
+    else if (strncasecmp(query, "AS", 2) == 0)
+        snprintf(url, sizeof(url), "%s/autnum/%s", base, query + 2);
+    else
+        snprintf(url, sizeof(url), "%s/domain/%s", base, query);
+
+    urlString = CFStringCreateWithCString(NULL, url, kCFStringEncodingUTF8);
+    urlRef = CFURLCreateWithString(NULL, urlString, NULL);
+
+    CFHTTPMessageRef req =
+        CFHTTPMessageCreateRequest(NULL, CFSTR("GET"), urlRef, kCFHTTPVersion1_1);
+    stream = CFReadStreamCreateForHTTPRequest(NULL, req);
+
+    if (!stream || !CFReadStreamOpen(stream)) {
+        fprintf(stderr, "whois: RDAP open failed for %s\n", url);
+        if (stream) CFRelease(stream);
+        CFRelease(req);
+        CFRelease(urlRef);
+        CFRelease(urlString);
+        return -1;
+    }
+
+    CFMutableDataRef data = CFDataCreateMutable(NULL, 0);
+    while ((n = CFReadStreamRead(stream, buf, sizeof(buf))) > 0)
+        CFDataAppendBytes(data, buf, n);
+    CFReadStreamClose(stream);
+    CFRelease(stream);
+    CFRelease(req);
+    CFRelease(urlRef);
+    CFRelease(urlString);
+
+    printf("# Using RDAP: %s\n\n", url);
+
+    CFErrorRef err = NULL;
+    CFPropertyListRef json = CFPropertyListCreateWithData(
+        NULL, data, kCFPropertyListImmutable, NULL, &err);
+
+    if (json == NULL || err != NULL) {
+        fprintf(stderr, "whois: JSON parse failed\n");
+        if (err) CFRelease(err);
+        CFRelease(data);
+        return -1;
+    }
+
+    print_json_as_whois(json, 0);
+    printf("source:         RDAP\n");
+
+    CFRelease(json);
+    CFRelease(data);
+    return 0;
+}
+#endif /* WITH_RDAP */
+
+
 static void
 whois(const char *query, const char *hostname, const char *hostport, int flags)
 {
@@ -481,6 +661,17 @@ whois(const char *query, const char *hostname, const char *hostport, int flags)
 	char *buf, *host, *nhost, *nport, *p;
 	int comment, s, f;
 	size_t len, i;
+    
+    #ifdef __APPLE__
+    #ifdef WITH_RDAP
+
+    if (flags & WHOIS_RDAP) {
+        if (rdap_query(hostname, query, flags) == 0)
+            return;  /* RDAP succeeded */
+        /* fallback to classic WHOIS automatically */
+    }
+    #endif
+    #endif
 
 	hostres = gethostinfo(hostname, hostport, 1);
 	s = connect_to_any_host(hostres);
@@ -647,8 +838,14 @@ whois(const char *query, const char *hostname, const char *hostport, int flags)
 static void
 usage(void)
 {
-	fprintf(stderr,
-	    "usage: whois [-aAbfgiIklmPQrRS] [-c country-code | -h hostname] "
-	    "[-p port] name ...\n");
-	exit(EX_USAGE);
+#ifdef WITH_RDAP
+    fprintf(stderr,
+        "usage: whois [-aAbfgiIklmPQrRS] [-c country-code | -h hostname] "
+        "[-p port] [--rdap | --legacy] name ...\n");
+#else
+    fprintf(stderr,
+        "usage: whois [-aAbfgiIklmPQrRS] [-c country-code | -h hostname] "
+        "[-p port] name ...\n");
+#endif
+    exit(EX_USAGE);
 }
